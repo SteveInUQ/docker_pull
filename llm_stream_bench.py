@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""LLM streaming benchmark tool based on OpenAI-compatible APIs."""
+"""LLM streaming benchmark tool based on OpenAI-compatible APIs.
+
+核心能力：
+1. 读取 YAML 配置并做结构校验。
+2. 使用 OpenAI 兼容接口发起 stream=true 请求并采集时间指标。
+3. 按「模型 × 并发档位」聚合 TTFT/TPOT、成功率与错误分类。
+4. 产出 JSON（事实源）与 Markdown（可读报告）两类结果。
+"""
 
 import argparse
 import copy
@@ -50,10 +57,14 @@ class BenchConfig:
 
 
 class ConfigError(Exception):
+    """配置校验失败异常。"""
+
     pass
 
 
 def _quantile(values: List[float], q: float) -> Optional[float]:
+    """计算分位数（线性插值）。"""
+
     if not values:
         return None
     arr = sorted(values)
@@ -66,12 +77,16 @@ def _quantile(values: List[float], q: float) -> Optional[float]:
 
 
 def _safe_mean(values: List[float]) -> Optional[float]:
+    """安全均值：空列表返回 None。"""
+
     if not values:
         return None
     return sum(values) / len(values)
 
 
 def classify_error(exc: Exception) -> str:
+    """将异常映射为统一错误类型，便于统计错误率与分类计数。"""
+
     if isinstance(exc, (openai.APITimeoutError, TimeoutError)):
         return "timeout"
     if isinstance(exc, openai.RateLimitError):
@@ -86,6 +101,8 @@ def classify_error(exc: Exception) -> str:
 
 
 def validate_and_build_config(raw: Dict[str, Any]) -> BenchConfig:
+    """校验 YAML 配置并转换为内部配置对象。"""
+
     if not isinstance(raw, dict):
         raise ConfigError("YAML root must be a mapping")
 
@@ -178,6 +195,8 @@ def validate_and_build_config(raw: Dict[str, Any]) -> BenchConfig:
 
 
 def resolve_api_key(model_cfg: ModelConfig) -> str:
+    """解析模型 API Key，优先用明文 api_key，其次读取 api_key_env。"""
+
     if model_cfg.api_key:
         return model_cfg.api_key
     assert model_cfg.api_key_env is not None
@@ -195,6 +214,14 @@ def run_one_stream(
     timeout_s: float,
     retry: int,
 ) -> Dict[str, Any]:
+    """执行一次流式请求并返回 run 级别指标。
+
+    指标口径：
+    - TTFT: t_first - t0
+    - TPOT: (t_end - t_first) / output_tokens
+    """
+
+    # 请求参数合并顺序：全局默认 < 模型覆盖；并强制 stream=true。
     payload = dict(request_defaults)
     payload.update(model_cfg.request_overrides or {})
     payload["stream"] = True
@@ -202,6 +229,7 @@ def run_one_stream(
     last_exc: Optional[Exception] = None
 
     for attempt in range(retry + 1):
+        # t0/t_first/t_end 分别对应请求开始、首 token 到达、流结束。
         t0 = time.perf_counter()
         t_first = None
         t_end = None
@@ -221,6 +249,8 @@ def run_one_stream(
                     if content:
                         if t_first is None:
                             t_first = time.perf_counter()
+                        # 这里按“增量片段数量”近似输出 token 数，
+                        # 用于 TPOT 的对比统计（各模型口径保持一致即可）。
                         if isinstance(content, str):
                             output_tokens += 1
                         elif isinstance(content, list):
@@ -248,6 +278,7 @@ def run_one_stream(
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
             if attempt < retry:
+                # 简单线性退避，减轻瞬时抖动导致的失败。
                 time.sleep(0.3 * (attempt + 1))
                 continue
 
@@ -265,6 +296,8 @@ def run_one_stream(
 
 
 def execute_benchmark(config: BenchConfig, raw_snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """执行完整评测流程：模型循环 -> 并发档位循环 -> warmup + 正式评测。"""
+
     all_runs: List[Dict[str, Any]] = []
     aggregate_rows: List[Dict[str, Any]] = []
 
@@ -274,6 +307,7 @@ def execute_benchmark(config: BenchConfig, raw_snapshot: Dict[str, Any]) -> Dict
 
         for conc in config.run.concurrency:
             def build_jobs() -> List[Tuple[str, Dict[str, Any], int]]:
+                """构造正式评测任务列表（每 case 重复 runs_per_case 次）。"""
                 jobs: List[Tuple[str, Dict[str, Any], int]] = []
                 for case in config.test_cases:
                     for run_index in range(config.run.runs_per_case):
@@ -286,6 +320,7 @@ def execute_benchmark(config: BenchConfig, raw_snapshot: Dict[str, Any]) -> Dict
                     warmup_jobs.append(case)
 
             if warmup_jobs:
+                # warmup 走同一请求路径，但结果不计入最终统计。
                 with ThreadPoolExecutor(max_workers=conc) as executor:
                     futures = [
                         executor.submit(
@@ -337,6 +372,7 @@ def execute_benchmark(config: BenchConfig, raw_snapshot: Dict[str, Any]) -> Dict
                 for future in as_completed(futures):
                     all_runs.append(future.result())
 
+            # 按「模型 × 并发」独立聚合，避免不同并发档位混算。
             scoped = [r for r in all_runs if r["model_id"] == model_cfg.id and r["concurrency"] == conc and not r["warmup"]]
             success_rows = [r for r in scoped if r["success"]]
             ttft_values = [r["ttft_s"] for r in success_rows if r["ttft_s"] is not None]
@@ -377,6 +413,8 @@ def execute_benchmark(config: BenchConfig, raw_snapshot: Dict[str, Any]) -> Dict
 
 
 def mask_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """脱敏配置快照，防止 JSON 报告泄漏明文 api_key。"""
+
     masked = copy.deepcopy(snapshot)
     for model in masked.get("models", []):
         if "api_key" in model and model["api_key"]:
@@ -385,12 +423,16 @@ def mask_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _fmt(num: Optional[float]) -> str:
+    """报表格式化：None 输出 '-'。"""
+
     if num is None:
         return "-"
     return f"{num:.4f}"
 
 
 def build_markdown_report(result: Dict[str, Any]) -> str:
+    """生成按并发档位分组的 Markdown 汇总报告。"""
+
     lines: List[str] = []
     lines.append("# LLM 流式输出性能评测报告")
     lines.append("")
@@ -428,6 +470,8 @@ def build_markdown_report(result: Dict[str, Any]) -> str:
 
 
 def parse_args() -> argparse.Namespace:
+    """解析命令行参数。"""
+
     parser = argparse.ArgumentParser(description="Benchmark streaming performance of LLMs via OpenAI-compatible APIs")
     parser.add_argument("--config", required=True, help="Path to YAML config")
     parser.add_argument("--output-dir", default="benchmark_reports", help="Directory for output reports")
@@ -436,6 +480,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    """程序入口：读取配置 -> 执行评测 -> 输出 JSON/Markdown。"""
+
     args = parse_args()
     config_path = Path(args.config)
     if not config_path.exists():
