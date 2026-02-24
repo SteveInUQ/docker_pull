@@ -1,0 +1,28 @@
+version: 1
+
+global:
+  run:
+    warmup_runs: 1
+    runs_per_case: 3
+    timeout_s: 60
+    retry: 1
+    concurrency: [1, 2, 4]
+  request_defaults:
+    temperature: 0.2
+    top_p: 0.9
+    max_tokens: 256
+
+test_cases:
+  - id: case_001
+    messages:
+      - role: user
+        content: "用一句话解释什么是RAG。"
+
+models:
+  - id: demo_model
+    name: "Demo"
+    base_url: "https://example-openai-compatible/v1"
+    api_key_env: "DEMO_API_KEY"
+    model: "demo-chat-model"
+    request_overrides:
+      temperature: 0.1

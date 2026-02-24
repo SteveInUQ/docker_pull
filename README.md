@@ -45,3 +45,25 @@ Fetch image from private registry
 ```bash
 > ./docker_pull.py --user username --password 'P@$$w0rd' private-registry.mydomain.com/my_image:1.2.3
 ```
+
+## LLM 流式输出性能评测工具
+新增 `llm_stream_bench.py`，用于对多个 OpenAI 兼容接口模型进行流式性能评测。
+
+### 安装依赖
+```bash
+pip install -r requirements.txt
+```
+
+### 运行
+```bash
+python llm_stream_bench.py --config benchmark.yaml
+```
+
+支持参数：
+- `--config`：YAML 配置路径（必填）
+- `--output-dir`：输出目录（默认 `benchmark_reports`）
+- `--output-prefix`：输出文件名前缀（默认 `llm_stream_benchmark`）
+
+运行后会输出两份报告：
+- JSON：结构化明细与聚合结果
+- Markdown：按并发分组的可读对比报告
