@@ -219,12 +219,20 @@ def run_one_stream(
     指标口径：
     - TTFT: t_first - t0
     - TPOT: (t_end - t_first) / output_tokens
+
+    说明：
+    - output_tokens 优先使用流式 usage.completion_tokens（真实 token 数）。
+    - 若服务端未返回 usage，则 TPOT 置为 None，避免把 chunk 数误当 token 数。
     """
 
     # 请求参数合并顺序：全局默认 < 模型覆盖；并强制 stream=true。
     payload = dict(request_defaults)
     payload.update(model_cfg.request_overrides or {})
     payload["stream"] = True
+    # 尝试要求服务端在流结束时返回 usage，便于获得真实 completion token 数。
+    stream_options = dict(payload.get("stream_options", {}) or {})
+    stream_options["include_usage"] = True
+    payload["stream_options"] = stream_options
 
     last_exc: Optional[Exception] = None
 
@@ -233,7 +241,8 @@ def run_one_stream(
         t0 = time.perf_counter()
         t_first = None
         t_end = None
-        output_tokens = 0
+        output_chunks = 0
+        completion_tokens: Optional[int] = None
 
         try:
             stream = client.with_options(timeout=timeout_s).chat.completions.create(
@@ -242,6 +251,11 @@ def run_one_stream(
                 **payload,
             )
             for chunk in stream:
+                # OpenAI 兼容流通常会在最后一个 chunk（或某个 chunk）里返回 usage。
+                usage = getattr(chunk, "usage", None)
+                if usage is not None:
+                    completion_tokens = getattr(usage, "completion_tokens", None)
+
                 choices = getattr(chunk, "choices", None) or []
                 for choice in choices:
                     delta = getattr(choice, "delta", None)
@@ -249,14 +263,13 @@ def run_one_stream(
                     if content:
                         if t_first is None:
                             t_first = time.perf_counter()
-                        # 这里按“增量片段数量”近似输出 token 数，
-                        # 用于 TPOT 的对比统计（各模型口径保持一致即可）。
+                        # chunk 数仅作为观测字段，不参与 TPOT 分母。
                         if isinstance(content, str):
-                            output_tokens += 1
+                            output_chunks += 1
                         elif isinstance(content, list):
-                            output_tokens += len(content)
+                            output_chunks += len(content)
                         else:
-                            output_tokens += 1
+                            output_chunks += 1
             t_end = time.perf_counter()
 
             if t_first is None:
@@ -264,16 +277,21 @@ def run_one_stream(
 
             ttft = t_first - t0
             output_duration = max(0.0, t_end - t_first)
-            tpot = output_duration / max(output_tokens, 1)
+            tpot = None
+            if completion_tokens is not None and completion_tokens > 0:
+                tpot = output_duration / completion_tokens
+
             return {
                 "success": True,
                 "ttft_s": ttft,
                 "tpot_s": tpot,
-                "output_tokens": output_tokens,
+                "output_tokens": completion_tokens,
+                "output_chunks": output_chunks,
                 "latency_s": t_end - t0,
                 "error_type": None,
                 "error_message": None,
                 "attempt": attempt + 1,
+                "token_source": "usage.completion_tokens" if completion_tokens is not None else "unknown",
             }
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
@@ -287,11 +305,13 @@ def run_one_stream(
         "success": False,
         "ttft_s": None,
         "tpot_s": None,
-        "output_tokens": 0,
+        "output_tokens": None,
+        "output_chunks": 0,
         "latency_s": None,
         "error_type": classify_error(last_exc),
         "error_message": str(last_exc),
         "attempt": retry + 1,
+        "token_source": None,
     }
 
 
