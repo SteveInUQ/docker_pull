@@ -2,7 +2,6 @@ version: 1
 
 global:
   run:
-    warmup_runs: 1
     runs_per_case: 3
     timeout_s: 60
     retry: 1

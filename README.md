@@ -65,5 +65,7 @@ python llm_stream_bench.py --config benchmark.yaml
 - `--output-prefix`：输出文件名前缀（默认 `llm_stream_benchmark`）
 
 运行后会输出两份报告：
+
+说明：评测流程已取消 warmup 阶段，所有执行均计入统计。
 - JSON：结构化明细与聚合结果
 - Markdown：按并发分组的可读对比报告

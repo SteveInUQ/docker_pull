@@ -9,21 +9,20 @@
 """
 
 import argparse
+import asyncio
 import copy
 import dataclasses
 import datetime as dt
 import json
 import math
 import os
-import threading
 import time
 from collections import Counter, defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import openai
-from openai import OpenAI
+from openai import AsyncOpenAI
 import yaml
 
 
@@ -40,7 +39,6 @@ class ModelConfig:
 
 @dataclasses.dataclass
 class RunConfig:
-    warmup_runs: int
     runs_per_case: int
     timeout_s: float
     retry: int
@@ -115,7 +113,7 @@ def validate_and_build_config(raw: Dict[str, Any]) -> BenchConfig:
     if not isinstance(run_raw, dict):
         raise ConfigError("Missing required field: global.run")
 
-    required_run_fields = ["warmup_runs", "runs_per_case", "timeout_s", "retry", "concurrency"]
+    required_run_fields = ["runs_per_case", "timeout_s", "retry", "concurrency"]
     for field in required_run_fields:
         if field not in run_raw:
             raise ConfigError(f"Missing required field: global.run.{field}")
@@ -178,7 +176,6 @@ def validate_and_build_config(raw: Dict[str, Any]) -> BenchConfig:
         )
 
     run = RunConfig(
-        warmup_runs=int(run_raw["warmup_runs"]),
         runs_per_case=int(run_raw["runs_per_case"]),
         timeout_s=float(run_raw["timeout_s"]),
         retry=int(run_raw["retry"]),
@@ -206,8 +203,8 @@ def resolve_api_key(model_cfg: ModelConfig) -> str:
     return api_key
 
 
-def run_one_stream(
-    client: OpenAI,
+async def run_one_stream(
+    client: AsyncOpenAI,
     model_cfg: ModelConfig,
     case: Dict[str, Any],
     request_defaults: Dict[str, Any],
@@ -245,12 +242,12 @@ def run_one_stream(
         completion_tokens: Optional[int] = None
 
         try:
-            stream = client.with_options(timeout=timeout_s).chat.completions.create(
+            stream = await client.with_options(timeout=timeout_s).chat.completions.create(
                 model=model_cfg.model,
                 messages=case["messages"],
                 **payload,
             )
-            for chunk in stream:
+            async for chunk in stream:
                 # OpenAI 兼容流通常会在最后一个 chunk（或某个 chunk）里返回 usage。
                 usage = getattr(chunk, "usage", None)
                 if usage is not None:
@@ -297,7 +294,7 @@ def run_one_stream(
             last_exc = exc
             if attempt < retry:
                 # 简单线性退避，减轻瞬时抖动导致的失败。
-                time.sleep(0.3 * (attempt + 1))
+                await asyncio.sleep(0.3 * (attempt + 1))
                 continue
 
     assert last_exc is not None
@@ -315,58 +312,24 @@ def run_one_stream(
     }
 
 
-def execute_benchmark(config: BenchConfig, raw_snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    """执行完整评测流程：模型循环 -> 并发档位循环 -> warmup + 正式评测。"""
+async def execute_benchmark(config: BenchConfig, raw_snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """执行完整评测流程：模型循环 -> 并发档位循环 -> 正式评测。"""
 
     all_runs: List[Dict[str, Any]] = []
     aggregate_rows: List[Dict[str, Any]] = []
 
     for model_cfg in config.models:
         api_key = resolve_api_key(model_cfg)
-        client = OpenAI(base_url=model_cfg.base_url, api_key=api_key)
+        client = AsyncOpenAI(base_url=model_cfg.base_url, api_key=api_key)
 
         for conc in config.run.concurrency:
-            def build_jobs() -> List[Tuple[str, Dict[str, Any], int]]:
-                """构造正式评测任务列表（每 case 重复 runs_per_case 次）。"""
-                jobs: List[Tuple[str, Dict[str, Any], int]] = []
-                for case in config.test_cases:
-                    for run_index in range(config.run.runs_per_case):
-                        jobs.append((case["id"], case, run_index + 1))
-                return jobs
+            jobs: List[Tuple[str, Dict[str, Any], int]] = []
+            for case in config.test_cases:
+                for run_index in range(config.run.runs_per_case):
+                    jobs.append((case["id"], case, run_index + 1))
 
-            warmup_jobs = []
-            for _ in range(config.run.warmup_runs):
-                for case in config.test_cases:
-                    warmup_jobs.append(case)
-
-            if warmup_jobs:
-                # warmup 走同一请求路径，但结果不计入最终统计。
-                with ThreadPoolExecutor(max_workers=conc) as executor:
-                    futures = [
-                        executor.submit(
-                            run_one_stream,
-                            client,
-                            model_cfg,
-                            case,
-                            config.request_defaults,
-                            config.run.timeout_s,
-                            config.run.retry,
-                        )
-                        for case in warmup_jobs
-                    ]
-                    for future in as_completed(futures):
-                        future.result()
-
-            jobs = build_jobs()
-            run_counter = 0
-            counter_lock = threading.Lock()
-
-            def do_job(case_id: str, case: Dict[str, Any], run_index: int) -> Dict[str, Any]:
-                nonlocal run_counter
-                with counter_lock:
-                    run_counter += 1
-                    run_id = run_counter
-                result = run_one_stream(
+            async def do_job(job_id: int, case_id: str, case: Dict[str, Any], run_index: int) -> Dict[str, Any]:
+                result = await run_one_stream(
                     client,
                     model_cfg,
                     case,
@@ -381,19 +344,23 @@ def execute_benchmark(config: BenchConfig, raw_snapshot: Dict[str, Any]) -> Dict
                         "concurrency": conc,
                         "case_id": case_id,
                         "run_index": run_index,
-                        "run_id": run_id,
-                        "warmup": False,
+                        "run_id": job_id,
                     }
                 )
                 return result
 
-            with ThreadPoolExecutor(max_workers=conc) as executor:
-                futures = [executor.submit(do_job, case_id, case, run_idx) for case_id, case, run_idx in jobs]
-                for future in as_completed(futures):
-                    all_runs.append(future.result())
+            semaphore = asyncio.Semaphore(conc)
+
+            async def bounded_job(job_id: int, case_id: str, case: Dict[str, Any], run_index: int) -> Dict[str, Any]:
+                async with semaphore:
+                    return await do_job(job_id, case_id, case, run_index)
+
+            scoped = await asyncio.gather(
+                *(bounded_job(idx + 1, case_id, case, run_idx) for idx, (case_id, case, run_idx) in enumerate(jobs))
+            )
+            all_runs.extend(scoped)
 
             # 按「模型 × 并发」独立聚合，避免不同并发档位混算。
-            scoped = [r for r in all_runs if r["model_id"] == model_cfg.id and r["concurrency"] == conc and not r["warmup"]]
             success_rows = [r for r in scoped if r["success"]]
             ttft_values = [r["ttft_s"] for r in success_rows if r["ttft_s"] is not None]
             tpot_values = [r["tpot_s"] for r in success_rows if r["tpot_s"] is not None]
@@ -516,7 +483,7 @@ def main() -> int:
         raise SystemExit(f"Invalid config: {exc}") from exc
 
     snapshot = mask_snapshot(raw)
-    result = execute_benchmark(config, snapshot)
+    result = asyncio.run(execute_benchmark(config, snapshot))
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
