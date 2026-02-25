@@ -82,9 +82,7 @@ coder-eva-service/
 │   │   └── llm_bench_cases.json
 │   └── run_llm_bench.py
 ├── configs/
-│   ├── llm_models.yaml
-│   ├── .env
-│   └── .secret
+│   └── llm_models.yaml
 └── results/
 ```
 
@@ -99,8 +97,8 @@ python coder-eva-service/tools/run_llm_bench.py
 - `--benchmark-config`（默认 `coder-eva-service/tools/configs/benchmark.yaml`）
 - `--models-config`（默认 `coder-eva-service/configs/llm_models.yaml`）
 - `--cases`（默认 `coder-eva-service/tools/data/llm_bench_cases.json`）
-- `--secret-file`（默认 `coder-eva-service/configs/.secret`）
 - `--results-dir`（默认 `coder-eva-service/results`）
+- `--log-level`（默认 `INFO`）
 
 ### 模型配置示例
 支持 `模型名@平台` 键名区分同模型的不同平台：
@@ -109,7 +107,10 @@ python coder-eva-service/tools/run_llm_bench.py
 models:
   qwen3-coder-480b-a35b-instruct@doubao:
     api_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-    api_key_field: DASHSCOPE_API_KEY
+    api_key: <DASHSCOPE_API_KEY>
 ```
 
-> `api_key_field` 会从 `.secret`（或 `.env`）里读取同名字段值。
+> `api_key` 直接填写对应平台的 key（或由外部流程在运行前注入）。
+
+
+运行日志基于 `loguru` 输出。

@@ -15,7 +15,6 @@ import dataclasses
 import datetime as dt
 import json
 import math
-import os
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -33,7 +32,6 @@ class ModelConfig:
     base_url: str
     model: str
     api_key: Optional[str] = None
-    api_key_env: Optional[str] = None
     request_overrides: Optional[Dict[str, Any]] = None
 
 
@@ -159,9 +157,8 @@ def validate_and_build_config(raw: Dict[str, Any]) -> BenchConfig:
         seen_ids.add(model_id)
 
         api_key = model_raw.get("api_key")
-        api_key_env = model_raw.get("api_key_env")
-        if not api_key and not api_key_env:
-            raise ConfigError(f"models[{idx}] needs api_key or api_key_env")
+        if not api_key:
+            raise ConfigError(f"models[{idx}] needs api_key")
 
         models.append(
             ModelConfig(
@@ -170,7 +167,6 @@ def validate_and_build_config(raw: Dict[str, Any]) -> BenchConfig:
                 base_url=model_raw["base_url"],
                 model=model_raw["model"],
                 api_key=api_key,
-                api_key_env=api_key_env,
                 request_overrides=model_raw.get("request_overrides", {}),
             )
         )
@@ -192,15 +188,11 @@ def validate_and_build_config(raw: Dict[str, Any]) -> BenchConfig:
 
 
 def resolve_api_key(model_cfg: ModelConfig) -> str:
-    """解析模型 API Key，优先用明文 api_key，其次读取 api_key_env。"""
+    """解析模型 API Key，仅支持 api_key。"""
 
-    if model_cfg.api_key:
-        return model_cfg.api_key
-    assert model_cfg.api_key_env is not None
-    api_key = os.getenv(model_cfg.api_key_env)
-    if not api_key:
-        raise ConfigError(f"Environment variable not set: {model_cfg.api_key_env}")
-    return api_key
+    if not model_cfg.api_key:
+        raise ConfigError("model.api_key is required")
+    return model_cfg.api_key
 
 
 async def run_one_stream(

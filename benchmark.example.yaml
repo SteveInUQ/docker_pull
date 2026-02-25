@@ -21,7 +21,7 @@ models:
   - id: demo_model
     name: "Demo"
     base_url: "https://example-openai-compatible/v1"
-    api_key_env: "DEMO_API_KEY"
+    api_key: "<OPENAI_API_KEY>"
     model: "demo-chat-model"
     request_overrides:
       temperature: 0.1

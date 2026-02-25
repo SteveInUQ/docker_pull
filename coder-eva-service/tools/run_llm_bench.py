@@ -1,47 +1,24 @@
 #!/usr/bin/env python3
-"""Run streaming benchmark for all models declared in configs/llm_models.yaml.
-
-Project layout:
-- coder-eva-service/tools/configs/benchmark.yaml
-- coder-eva-service/tools/data/llm_bench_cases.json
-- coder-eva-service/configs/llm_models.yaml
-- coder-eva-service/configs/.secret
-- coder-eva-service/results/
-"""
+"""Run streaming benchmark for all models declared in configs/llm_models.yaml."""
 
 import argparse
 import asyncio
 import datetime as dt
 import json
 import math
-import os
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import openai
+from loguru import logger
 from openai import AsyncOpenAI
 import yaml
 
 
 class ConfigError(Exception):
     """Raised when config/model/case files are invalid."""
-
-
-def load_key_value_file(path: Path) -> Dict[str, str]:
-    """Parse simple KEY=VALUE files like .env/.secret."""
-    out: Dict[str, str] = {}
-    if not path.exists():
-        return out
-
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        out[key.strip()] = value.strip().strip('"').strip("'")
-    return out
 
 
 def load_yaml(path: Path) -> Dict[str, Any]:
@@ -84,38 +61,11 @@ def parse_model_key(model_key: str) -> Tuple[str, str]:
     return model_name.strip(), platform.strip()
 
 
-def resolve_api_key(model_cfg: Dict[str, Any], secrets: Dict[str, str]) -> str:
-    """Resolve api key from explicit value or a field name in .secret/.env.
-
-    Priority:
-    1) api_key_field: a key name in .secret/.env (recommended)
-    2) api_key_env: env var name
-    3) api_key: literal value OR env var name if matches existing env/secrets
-    """
-    field = model_cfg.get("api_key_field")
-    if field:
-        if field in secrets and secrets[field]:
-            return secrets[field]
-        if os.getenv(field):
-            return os.getenv(field, "")
-        raise ConfigError(f"api_key_field not found in .secret/.env/env: {field}")
-
-    env_name = model_cfg.get("api_key_env")
-    if env_name:
-        value = os.getenv(env_name) or secrets.get(env_name)
-        if value:
-            return value
-        raise ConfigError(f"api_key_env not found: {env_name}")
-
-    key = model_cfg.get("api_key")
-    if not key:
-        raise ConfigError("model requires api_key_field/api_key_env/api_key")
-
-    # If api_key looks like a field name, resolve from secret/env first.
-    maybe = os.getenv(str(key)) or secrets.get(str(key))
-    if maybe:
-        return maybe
-    return str(key)
+def resolve_api_key(model_cfg: Dict[str, Any]) -> str:
+    api_key = model_cfg.get("api_key")
+    if not api_key:
+        raise ConfigError("model requires api_key")
+    return str(api_key)
 
 
 def classify_error(exc: Exception) -> str:
@@ -192,10 +142,7 @@ async def run_one_stream(
                     if content:
                         if t_first is None:
                             t_first = time.perf_counter()
-                        if isinstance(content, list):
-                            output_chunks += len(content)
-                        else:
-                            output_chunks += 1
+                        output_chunks += len(content) if isinstance(content, list) else 1
 
             t_end = time.perf_counter()
             if t_first is None:
@@ -249,6 +196,8 @@ def parse_models(models_yaml: Dict[str, Any]) -> List[Dict[str, Any]]:
             raise ConfigError(f"model '{key}' config must be mapping")
         if "api_url" not in cfg:
             raise ConfigError(f"model '{key}' missing api_url")
+        if "api_key" not in cfg:
+            raise ConfigError(f"model '{key}' missing api_key")
 
         model_name, platform = parse_model_key(str(key))
         parsed.append(
@@ -257,9 +206,7 @@ def parse_models(models_yaml: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "name": model_name,
                 "platform": platform,
                 "api_url": cfg["api_url"],
-                "api_key": cfg.get("api_key"),
-                "api_key_env": cfg.get("api_key_env"),
-                "api_key_field": cfg.get("api_key_field"),
+                "api_key": cfg["api_key"],
                 "request_overrides": cfg.get("request_overrides", {}),
             }
         )
@@ -270,7 +217,6 @@ async def execute(
     models: List[Dict[str, Any]],
     cases: List[Dict[str, Any]],
     benchmark_cfg: Dict[str, Any],
-    secrets: Dict[str, str],
 ) -> Dict[str, Any]:
     run_cfg = ((benchmark_cfg.get("global") or {}).get("run") or {})
     request_defaults = ((benchmark_cfg.get("global") or {}).get("request_defaults") or {})
@@ -287,8 +233,9 @@ async def execute(
     aggregates: List[Dict[str, Any]] = []
 
     for model in models:
-        api_key = resolve_api_key(model, secrets)
+        api_key = resolve_api_key(model)
         client = AsyncOpenAI(base_url=model["api_url"], api_key=api_key)
+        logger.info("Start model={} platform={} conc_levels={}", model["name"], model["platform"], conc_levels)
 
         for conc in conc_levels:
             jobs: List[Tuple[str, List[Dict[str, Any]], int]] = []
@@ -296,6 +243,7 @@ async def execute(
                 for i in range(runs_per_case):
                     jobs.append((case["id"], case["messages"], i + 1))
 
+            logger.info("Running model={} platform={} concurrency={} jobs={}", model["name"], model["platform"], conc, len(jobs))
             semaphore = asyncio.Semaphore(int(conc))
 
             async def one_job(job_id: int, case_id: str, messages: List[Dict[str, Any]], run_index: int) -> Dict[str, Any]:
@@ -335,6 +283,15 @@ async def execute(
             total = len(scoped)
             succ = len(success)
             fail = len(failures)
+            logger.info(
+                "Finished model={} platform={} concurrency={} success={}/{} fail={}",
+                model["name"],
+                model["platform"],
+                conc,
+                succ,
+                total,
+                fail,
+            )
 
             aggregates.append(
                 {
@@ -414,26 +371,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--benchmark-config", default=str(root / "tools" / "configs" / "benchmark.yaml"))
     parser.add_argument("--models-config", default=str(root / "configs" / "llm_models.yaml"))
     parser.add_argument("--cases", default=str(root / "tools" / "data" / "llm_bench_cases.json"))
-    parser.add_argument("--secret-file", default=str(root / "configs" / ".secret"))
-    parser.add_argument("--env-file", default=str(root / "configs" / ".env"))
     parser.add_argument("--results-dir", default=str(root / "results"))
     parser.add_argument("--output-prefix", default="llm_stream_benchmark")
+    parser.add_argument("--log-level", default="INFO")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    logger.remove()
+    logger.add(lambda msg: print(msg, end=""), level=args.log_level)
 
+    logger.info("Loading benchmark config from {}", args.benchmark_config)
     benchmark_cfg = load_yaml(Path(args.benchmark_config))
+    logger.info("Loading models config from {}", args.models_config)
     models_cfg = load_yaml(Path(args.models_config))
+    logger.info("Loading cases from {}", args.cases)
     cases = load_cases(Path(args.cases))
 
-    secrets = {}
-    secrets.update(load_key_value_file(Path(args.env_file)))
-    secrets.update(load_key_value_file(Path(args.secret_file)))
-
     models = parse_models(models_cfg)
-    report = asyncio.run(execute(models=models, cases=cases, benchmark_cfg=benchmark_cfg, secrets=secrets))
+    logger.info("Loaded {} models and {} test cases", len(models), len(cases))
+    report = asyncio.run(execute(models=models, cases=cases, benchmark_cfg=benchmark_cfg))
 
     results_dir = Path(args.results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -445,8 +403,8 @@ def main() -> int:
     json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     md_path.write_text(to_markdown(report), encoding="utf-8")
 
-    print(f"JSON report: {json_path}")
-    print(f"Markdown report: {md_path}")
+    logger.info("JSON report: {}", json_path)
+    logger.info("Markdown report: {}", md_path)
     return 0
 
 
