@@ -1,0 +1,12 @@
+version: 1
+
+global:
+  run:
+    runs_per_case: 3
+    timeout_s: 60
+    retry: 1
+    concurrency: [1, 2, 4]
+  request_defaults:
+    temperature: 0.2
+    top_p: 0.9
+    max_tokens: 512

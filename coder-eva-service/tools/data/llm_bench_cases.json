@@ -1,0 +1,14 @@
+[
+  {
+    "id": "case_001",
+    "messages": [
+      {"role": "user", "content": "用一句话解释什么是RAG。"}
+    ]
+  },
+  {
+    "id": "case_002",
+    "messages": [
+      {"role": "user", "content": "请给出Python实现快速排序的核心思路。"}
+    ]
+  }
+]

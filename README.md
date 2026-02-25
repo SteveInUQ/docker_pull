@@ -69,3 +69,47 @@ python llm_stream_bench.py --config benchmark.yaml
 说明：评测流程已取消 warmup 阶段，所有执行均计入统计。
 - JSON：结构化明细与聚合结果
 - Markdown：按并发分组的可读对比报告
+
+## coder-eva-service: LLM Streaming Benchmark
+
+### 目录结构
+```text
+coder-eva-service/
+├── tools/
+│   ├── configs/
+│   │   └── benchmark.yaml
+│   ├── data/
+│   │   └── llm_bench_cases.json
+│   └── run_llm_bench.py
+├── configs/
+│   ├── llm_models.yaml
+│   ├── .env
+│   └── .secret
+└── results/
+```
+
+### 使用方式
+默认会读取 `llm_models.yaml` 里 `models` 下的**所有模型**并执行评测：
+
+```bash
+python coder-eva-service/tools/run_llm_bench.py
+```
+
+可选参数：
+- `--benchmark-config`（默认 `coder-eva-service/tools/configs/benchmark.yaml`）
+- `--models-config`（默认 `coder-eva-service/configs/llm_models.yaml`）
+- `--cases`（默认 `coder-eva-service/tools/data/llm_bench_cases.json`）
+- `--secret-file`（默认 `coder-eva-service/configs/.secret`）
+- `--results-dir`（默认 `coder-eva-service/results`）
+
+### 模型配置示例
+支持 `模型名@平台` 键名区分同模型的不同平台：
+
+```yaml
+models:
+  qwen3-coder-480b-a35b-instruct@doubao:
+    api_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_field: DASHSCOPE_API_KEY
+```
+
+> `api_key_field` 会从 `.secret`（或 `.env`）里读取同名字段值。
