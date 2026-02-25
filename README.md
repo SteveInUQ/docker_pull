@@ -46,31 +46,6 @@ Fetch image from private registry
 > ./docker_pull.py --user username --password 'P@$$w0rd' private-registry.mydomain.com/my_image:1.2.3
 ```
 
-## LLM 流式输出性能评测工具
-新增 `llm_stream_bench.py`，用于对多个 OpenAI 兼容接口模型进行流式性能评测。
-
-### 安装依赖
-```bash
-pip install -r requirements.txt
-```
-
-### 运行
-```bash
-python llm_stream_bench.py --config benchmark.yaml
-```
-
-支持参数：
-- `--config`：YAML 配置路径（必填）
-- `--output-dir`：输出目录（默认 `benchmark_reports`）
-- `--output-prefix`：输出文件名前缀（默认 `llm_stream_benchmark`）
-- `--skip-preflight`：跳过压测前 API 可用性预检
-
-运行后会输出两份报告：
-
-说明：评测流程已取消 warmup 阶段，所有执行均计入统计。
-- JSON：结构化明细与聚合结果
-- Markdown：按并发分组的可读对比报告
-
 ## coder-eva-service: LLM Streaming Benchmark
 
 ### 目录结构
@@ -83,7 +58,8 @@ coder-eva-service/
 │   │   └── llm_bench_cases.json
 │   └── run_llm_bench.py
 ├── configs/
-│   └── llm_models.yaml
+│   ├── llm_models.yaml
+│   └── .secret
 └── results/
 ```
 
@@ -97,6 +73,7 @@ python coder-eva-service/tools/run_llm_bench.py
 可选参数：
 - `--benchmark-config`（默认 `coder-eva-service/tools/configs/benchmark.yaml`）
 - `--models-config`（默认 `coder-eva-service/configs/llm_models.yaml`）
+- `--secret-file`（默认 `coder-eva-service/configs/.secret`）
 - `--cases`（默认 `coder-eva-service/tools/data/llm_bench_cases.json`）
 - `--results-dir`（默认 `coder-eva-service/results`）
 - `--log-level`（默认 `INFO`）
@@ -109,10 +86,10 @@ python coder-eva-service/tools/run_llm_bench.py
 models:
   qwen3-coder-480b-a35b-instruct@doubao:
     api_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-    api_key: <DASHSCOPE_API_KEY>
+    api_key: DASHSCOPE_API_KEY
 ```
 
-> `api_key` 直接填写对应平台的 key（或由外部流程在运行前注入）。
+> `api_key` 填写 `.secret` 的字段名，程序会去 `.secret` 里取真实值。
 
 
-运行日志基于 `loguru` 输出。
+运行日志基于 Python `logging` 输出。
