@@ -109,6 +109,7 @@ async def run_one_stream(
     timeout_s: float,
     retry: int,
 ) -> Dict[str, Any]:
+    """Single streaming request with retry; collect TTFT/TPOT related fields."""
     payload = dict(request_defaults)
     payload.update(request_overrides or {})
     payload["stream"] = True
@@ -213,10 +214,27 @@ def parse_models(models_yaml: Dict[str, Any]) -> List[Dict[str, Any]]:
     return parsed
 
 
+async def preflight_model_api(client: AsyncOpenAI, model_name: str, timeout_s: float) -> Tuple[bool, Optional[str], float]:
+    """Preflight check: verify the model endpoint is callable before full benchmark."""
+    t0 = time.perf_counter()
+    try:
+        await client.with_options(timeout=timeout_s).chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": "ping"}],
+            stream=False,
+            max_tokens=8,
+            temperature=0,
+        )
+        return True, None, time.perf_counter() - t0
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc), time.perf_counter() - t0
+
+
 async def execute(
     models: List[Dict[str, Any]],
     cases: List[Dict[str, Any]],
     benchmark_cfg: Dict[str, Any],
+    enable_preflight: bool = True,
 ) -> Dict[str, Any]:
     run_cfg = ((benchmark_cfg.get("global") or {}).get("run") or {})
     request_defaults = ((benchmark_cfg.get("global") or {}).get("request_defaults") or {})
@@ -236,6 +254,46 @@ async def execute(
         api_key = resolve_api_key(model)
         client = AsyncOpenAI(base_url=model["api_url"], api_key=api_key)
         logger.info("Start model={} platform={} conc_levels={}", model["name"], model["platform"], conc_levels)
+
+        # 预检：在正式压测前先验证该模型 API 是否可用，避免大量任务直接失败。
+        if enable_preflight:
+            ok, err, elapsed = await preflight_model_api(client, model["name"], timeout_s)
+            if not ok:
+                logger.error(
+                    "Preflight failed model={} platform={} elapsed={:.3f}s error={}",
+                    model["name"],
+                    model["platform"],
+                    elapsed,
+                    err,
+                )
+                for conc in conc_levels:
+                    aggregates.append(
+                        {
+                            "model_id": model["id"],
+                            "model_name": model["name"],
+                            "platform": model["platform"],
+                            "concurrency": int(conc),
+                            "total_runs": 0,
+                            "success_runs": 0,
+                            "failed_runs": 0,
+                            "success_rate": 0.0,
+                            "error_rate": 1.0,
+                            "error_counts": {"preflight_failed": 1},
+                            "ttft_mean_s": None,
+                            "ttft_p50_s": None,
+                            "ttft_p95_s": None,
+                            "tpot_mean_s": None,
+                            "tpot_p50_s": None,
+                            "tpot_p95_s": None,
+                        }
+                    )
+                continue
+            logger.info(
+                "Preflight passed model={} platform={} elapsed={:.3f}s",
+                model["name"],
+                model["platform"],
+                elapsed,
+            )
 
         for conc in conc_levels:
             jobs: List[Tuple[str, List[Dict[str, Any]], int]] = []
@@ -374,6 +432,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--results-dir", default=str(root / "results"))
     parser.add_argument("--output-prefix", default="llm_stream_benchmark")
     parser.add_argument("--log-level", default="INFO")
+    parser.add_argument("--skip-preflight", action="store_true", help="Skip model API preflight check")
     return parser.parse_args()
 
 
@@ -391,7 +450,14 @@ def main() -> int:
 
     models = parse_models(models_cfg)
     logger.info("Loaded {} models and {} test cases", len(models), len(cases))
-    report = asyncio.run(execute(models=models, cases=cases, benchmark_cfg=benchmark_cfg))
+    report = asyncio.run(
+        execute(
+            models=models,
+            cases=cases,
+            benchmark_cfg=benchmark_cfg,
+            enable_preflight=not args.skip_preflight,
+        )
+    )
 
     results_dir = Path(args.results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)

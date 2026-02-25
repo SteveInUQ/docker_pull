@@ -63,6 +63,7 @@ python llm_stream_bench.py --config benchmark.yaml
 - `--config`：YAML 配置路径（必填）
 - `--output-dir`：输出目录（默认 `benchmark_reports`）
 - `--output-prefix`：输出文件名前缀（默认 `llm_stream_benchmark`）
+- `--skip-preflight`：跳过压测前 API 可用性预检
 
 运行后会输出两份报告：
 
@@ -99,6 +100,7 @@ python coder-eva-service/tools/run_llm_bench.py
 - `--cases`（默认 `coder-eva-service/tools/data/llm_bench_cases.json`）
 - `--results-dir`（默认 `coder-eva-service/results`）
 - `--log-level`（默认 `INFO`）
+- `--skip-preflight`（默认不跳过；会先做一次模型 API 预检）
 
 ### 模型配置示例
 支持 `模型名@平台` 键名区分同模型的不同平台：

@@ -195,6 +195,22 @@ def resolve_api_key(model_cfg: ModelConfig) -> str:
     return model_cfg.api_key
 
 
+async def preflight_model_api(client: AsyncOpenAI, model_name: str, timeout_s: float) -> Tuple[bool, Optional[str], float]:
+    """压测前预检：先验证模型接口是否可调用。"""
+    t0 = time.perf_counter()
+    try:
+        await client.with_options(timeout=timeout_s).chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": "ping"}],
+            stream=False,
+            max_tokens=8,
+            temperature=0,
+        )
+        return True, None, time.perf_counter() - t0
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc), time.perf_counter() - t0
+
+
 async def run_one_stream(
     client: AsyncOpenAI,
     model_cfg: ModelConfig,
@@ -304,7 +320,7 @@ async def run_one_stream(
     }
 
 
-async def execute_benchmark(config: BenchConfig, raw_snapshot: Dict[str, Any]) -> Dict[str, Any]:
+async def execute_benchmark(config: BenchConfig, raw_snapshot: Dict[str, Any], enable_preflight: bool = True) -> Dict[str, Any]:
     """执行完整评测流程：模型循环 -> 并发档位循环 -> 正式评测。"""
 
     all_runs: List[Dict[str, Any]] = []
@@ -313,6 +329,31 @@ async def execute_benchmark(config: BenchConfig, raw_snapshot: Dict[str, Any]) -
     for model_cfg in config.models:
         api_key = resolve_api_key(model_cfg)
         client = AsyncOpenAI(base_url=model_cfg.base_url, api_key=api_key)
+
+        if enable_preflight:
+            ok, err, elapsed = await preflight_model_api(client, model_cfg.model, config.run.timeout_s)
+            if not ok:
+                for conc in config.run.concurrency:
+                    aggregate_rows.append(
+                        {
+                            "model_id": model_cfg.id,
+                            "model_name": model_cfg.name,
+                            "concurrency": conc,
+                            "total_runs": 0,
+                            "success_runs": 0,
+                            "failed_runs": 0,
+                            "success_rate": 0.0,
+                            "error_rate": 1.0,
+                            "error_counts": {"preflight_failed": 1},
+                            "ttft_mean_s": None,
+                            "ttft_p50_s": None,
+                            "ttft_p95_s": None,
+                            "tpot_mean_s": None,
+                            "tpot_p50_s": None,
+                            "tpot_p95_s": None,
+                        }
+                    )
+                continue
 
         for conc in config.run.concurrency:
             jobs: List[Tuple[str, Dict[str, Any], int]] = []
@@ -455,6 +496,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", required=True, help="Path to YAML config")
     parser.add_argument("--output-dir", default="benchmark_reports", help="Directory for output reports")
     parser.add_argument("--output-prefix", default="llm_stream_benchmark", help="Output filename prefix")
+    parser.add_argument("--skip-preflight", action="store_true", help="Skip API preflight check")
     return parser.parse_args()
 
 
@@ -475,7 +517,7 @@ def main() -> int:
         raise SystemExit(f"Invalid config: {exc}") from exc
 
     snapshot = mask_snapshot(raw)
-    result = asyncio.run(execute_benchmark(config, snapshot))
+    result = asyncio.run(execute_benchmark(config, snapshot, enable_preflight=not args.skip_preflight))
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
