@@ -45,3 +45,51 @@ Fetch image from private registry
 ```bash
 > ./docker_pull.py --user username --password 'P@$$w0rd' private-registry.mydomain.com/my_image:1.2.3
 ```
+
+## coder-eva-service: LLM Streaming Benchmark
+
+### 目录结构
+```text
+coder-eva-service/
+├── tools/
+│   ├── configs/
+│   │   └── benchmark.yaml
+│   ├── data/
+│   │   └── llm_bench_cases.json
+│   └── run_llm_bench.py
+├── configs/
+│   ├── llm_models.yaml
+│   └── .secret
+└── results/
+```
+
+### 使用方式
+默认会读取 `llm_models.yaml` 里 `models` 下的**所有模型**并执行评测：
+
+```bash
+python coder-eva-service/tools/run_llm_bench.py
+```
+
+可选参数：
+- `--benchmark-config`（默认 `coder-eva-service/tools/configs/benchmark.yaml`）
+- `--models-config`（默认 `coder-eva-service/configs/llm_models.yaml`）
+- `--secret-file`（默认 `coder-eva-service/configs/.secret`）
+- `--cases`（默认 `coder-eva-service/tools/data/llm_bench_cases.json`）
+- `--results-dir`（默认 `coder-eva-service/results`）
+- `--log-level`（默认 `INFO`）
+- `--skip-preflight`（默认不跳过；会先做一次模型 API 预检）
+
+### 模型配置示例
+支持 `模型名@平台` 键名区分同模型的不同平台：
+
+```yaml
+models:
+  qwen3-coder-480b-a35b-instruct@doubao:
+    api_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key: DASHSCOPE_API_KEY
+```
+
+> `api_key` 填写 `.secret` 的字段名，程序会去 `.secret` 里取真实值。
+
+
+运行日志基于 Python `logging` 输出。
